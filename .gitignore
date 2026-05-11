@@ -1,0 +1,33 @@
+# 시크릿 / 환경 변수 (절대 push 금지)
+.env
+.env.local
+.env.*.local
+
+# 운영 데이터 (PC별 로컬, sync X)
+state.json
+state.*.json
+*.state.json
+
+# 브라우저 프로필 (cookies/sessions/login — 절대 push 금지)
+.user-data/
+.edge-profile/
+.chrome-profile/
+
+# 스크린샷 (디버그 산출물, 개인정보 가능)
+screenshots/
+diag/
+
+# 로그
+logs/
+*.log
+
+# Node
+node_modules/
+dist/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
