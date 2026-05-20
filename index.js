@@ -27,18 +27,36 @@ function writeState(s) {
     catch (e) { console.log(`[State] 쓰기 실패: ${e.message}`); }
 }
 
+// env 값은 trim — cmd의 `set NAME=value && ...` 패턴은 trailing space를 값에 포함시켜 비교 실패를 유발.
+const _env = (k, dflt = '') => (process.env[k] != null ? String(process.env[k]).trim() : dflt);
+
+// Hunt 모드 강제 종료 안전장치 — browser.close가 hang하면 node가 안 죽고 Task Scheduler가 "이미 실행 중"으로 다음 fires를 skip시키는 구조적 사고 방지.
+// 5분 안에 정상 종료 못 하면 process.exit(2)로 즉시 kill. Monthly(SCHEDULED) 모드는 11:30까지 폴링이라 제외.
+if (_env('CANCEL_HUNT') === 'true') {
+    const FORCE_EXIT_MS = 5 * 60 * 1000;
+    setTimeout(() => {
+        console.log(`[안전장치] ${FORCE_EXIT_MS / 60000}분 경과 — 강제 종료 (browser.close hang 가능성)`);
+        process.exit(2);
+    }, FORCE_EXIT_MS).unref();
+}
+
+// state.json은 동물별로 키를 분리해 충돌 방지 — dog는 기존 형식 유지(prefix 없음), cat는 "cat-" prefix.
+const ANIMAL_TYPE = (_env('ANIMAL_TYPE', 'dog')).toLowerCase();
+const STATE_KEY_PREFIX = ANIMAL_TYPE === 'cat' ? 'cat-' : '';
+
 function getMonthCount(monthKey) {
     const s = readState();
-    return (s.reservations[monthKey] || []).length;
+    return (s.reservations[STATE_KEY_PREFIX + monthKey] || []).length;
 }
 
 function recordReservation(monthKey, day, time) {
     const s = readState();
-    if (!s.reservations[monthKey]) s.reservations[monthKey] = [];
+    const key = STATE_KEY_PREFIX + monthKey;
+    if (!s.reservations[key]) s.reservations[key] = [];
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     const reservedAt = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-    s.reservations[monthKey].push({ day, time, reservedAt });
+    s.reservations[key].push({ day, time, reservedAt });
     writeState(s);
 }
 
@@ -110,15 +128,21 @@ function dayOfWeekKr(dateStr) {
     return ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
 }
 
+// 동물별 차이: dog=강아지(tl_HR, 1명 기본), cat=고양이(cl_HR, 2명 기본)
+const ANIMAL_LABEL = ANIMAL_TYPE === 'cat' ? '고양이' : '강아지';
+const ANIMAL_EMOJI = ANIMAL_TYPE === 'cat' ? '🐱' : '🐶';
 const CONFIG = {
     ID: process.env.USER_ID,
     PW: process.env.USER_PW,
     LOGIN_URL: 'http://www.reborncenter.org/bbs/login.php',
-    RESERVE_URL: 'http://www.reborncenter.org/plugin/tl_HR/form.php',
+    RESERVE_URL: ANIMAL_TYPE === 'cat'
+        ? 'http://www.reborncenter.org/plugin/cl_HR/form.php'
+        : 'http://www.reborncenter.org/plugin/tl_HR/form.php',
     TARGET_DAY: 6, // 0:일, 1:월, ..., 6:토
     TARGET_TIME_TEXT: '10:00', // 오전 10시
-    TARGET_PEOPLE: 1, // 1명
-    DRY_RUN: process.env.DRY_RUN === 'false' ? false : true,
+    // 인원수: env > 동물 기본값. cat=2명, dog=1명
+    TARGET_PEOPLE: _env('TARGET_PEOPLE') ? parseInt(_env('TARGET_PEOPLE'), 10) : (ANIMAL_TYPE === 'cat' ? 2 : 1),
+    DRY_RUN: _env('DRY_RUN') === 'false' ? false : true,
     RELOAD_INTERVAL: 2000, // 2초 대기
     MAX_ATTEMPTS: 10 // 시도 10회 후 종료
 };
@@ -131,8 +155,9 @@ async function log(msg) {
     if (!_logFirstEmitted) {
         const dayKr = ['일', '월', '화', '수', '목', '금', '토'][d.getDay()];
         // 회차 첫 줄만 [YY-MM-DD 요일 HH:MM:SS] — 이후 라인은 [HH:MM:SS]만
-        // prune-log.js가 today 라인을 제거할 때 두 패턴 모두 매칭함
+        // 앞에 빈 줄 1개 — 이전 회차/날짜와 시각적 구분 (날짜 경계 가독성)
         const ts = `${String(d.getFullYear()).slice(2)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${dayKr} ${time}`;
+        console.log('');
         console.log(`[${ts}] ${msg}`);
         _logFirstEmitted = true;
     } else {
@@ -140,7 +165,7 @@ async function log(msg) {
     }
 }
 
-const DISCORD_PREFIX = '[🐶 Volunteer]';
+const DISCORD_PREFIX = ANIMAL_TYPE === 'cat' ? '[🐱 Volunteer Cat]' : '[🐶 Volunteer]';
 async function notifyDiscord(content) {
     const url = process.env.DISCORD_WEBHOOK;
     if (!url) return;
@@ -158,7 +183,7 @@ async function notifyDiscord(content) {
 
 async function start() {
     log(`===========================================`);
-    log(`🔥 리본센터 봉사 예약 시스템 시작 `);
+    log(`🔥 리본센터 ${ANIMAL_LABEL} 봉사 예약 시스템 시작 ${ANIMAL_EMOJI}`);
     log(`🔥 현재 실행 모드: ${CONFIG.DRY_RUN ? '연습 모드 (DRY_RUN=true)' : '🚨 실제 예약 모드 (DRY_RUN=false)'}`);
     log(`===========================================`);
 
@@ -167,10 +192,18 @@ async function start() {
         return;
     }
 
-    const CANCEL_HUNT = process.env.CANCEL_HUNT === 'true';
+    const CANCEL_HUNT = _env('CANCEL_HUNT') === 'true';
 
-    // Hunt 모드 + 오늘이 15일이면 월간 스케줄과 충돌 방지를 위해 즉시 종료
-    if (CANCEL_HUNT && new Date().getDate() === 15) {
+    // SPECIFIC_DATE: 특정 날짜만 노리는 일회성 hunt 모드 (예: 2026-06-20). 그 외 후보는 모두 제외.
+    const SPECIFIC_DATE = _env('SPECIFIC_DATE');
+    const _sdMatch = SPECIFIC_DATE.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const SPECIFIC_DAY = _sdMatch ? parseInt(_sdMatch[3], 10) : null;
+    if (SPECIFIC_DATE && !_sdMatch) {
+        log(`[경고] SPECIFIC_DATE 형식 오류 (${SPECIFIC_DATE}) — 무시하고 일반 hunt 진행`);
+    }
+
+    // Hunt 모드 + 오늘이 15일이면 월간 스케줄(dog Monthly)과 충돌 방지를 위해 즉시 종료. cat은 Monthly 없음 → 영향 없음.
+    if (CANCEL_HUNT && ANIMAL_TYPE === 'dog' && new Date().getDate() === 15) {
         log('[hunt] 오늘은 15일 (월간 스케줄 실행일) — RebornVolunteer와 충돌 방지 위해 종료');
         return;
     }
@@ -184,7 +217,9 @@ async function start() {
 
     const winX = process.env.WINDOW_X ?? '973';
     const winY = process.env.WINDOW_Y ?? '1454';
-    const isHeadless = CANCEL_HUNT; // Hunt는 백그라운드(headless)
+    // Hunt는 기본 headless. HUNT_HEAD=true 면 검증용으로 화면 띄움.
+    const HUNT_HEAD = _env('HUNT_HEAD') === 'true';
+    const isHeadless = CANCEL_HUNT && !HUNT_HEAD;
     log(`브라우저 실행... headless=${isHeadless}, window-size=1920,1200, window-position=${winX},${winY}`);
     const browser = await chromium.launch({
         headless: isHeadless,
@@ -306,6 +341,7 @@ async function start() {
             return;
         }
 
+        const tag = `[${attempts}/${CONFIG.MAX_ATTEMPTS}]`;
         try {
             if (needsFullReload) {
                 await page.goto(CONFIG.RESERVE_URL, { waitUntil: 'domcontentloaded' });
@@ -319,62 +355,102 @@ async function start() {
                 : new Date(today.getFullYear(), today.getMonth(), 1);
             const expectedText = `${targetMonthDate.getFullYear()}.${String(targetMonthDate.getMonth() + 1).padStart(2, '0')}`;
 
+            // 첫 회차에 hunt config 한 번 노출
+            if (attempts === 1) {
+                const filterDesc = SPECIFIC_DAY != null ? `${SPECIFIC_DATE}만` : '모든 토요일';
+                log(`📍 타겟 ${expectedText} | ${filterDesc} | 10시 ${CONFIG.TARGET_PEOPLE}명 | MAX_ATTEMPTS=${CONFIG.MAX_ATTEMPTS}`);
+            }
+
+            // 달력 navi h2가 렌더링될 때까지 우선 대기 (페이지 첫 로드 직후 누락 방지)
+            await page.waitForSelector('.cal-navi h2', { timeout: 5000 }).catch(() => {});
             let currentMonthText = await page.$eval('.cal-navi h2', el => el.innerText).catch(() => '');
 
-            // 달력 이동 로직 (AJAX 기반이므로 페이지 로딩 없이 클릭만)
+            // 달력 이동 로직 — AJAX 클릭. 한 회차 내 최대 3번 click + polling 대기로 안정성 강화.
             if (!currentMonthText.includes(expectedText)) {
-                log(`현재 달력: ${currentMonthText || '(알수없음)'}. ${expectedText}로 이동을 시도합니다.`);
-                
-                // Playwright 네이티브 클릭 사용 (더 신뢰도 높음)
-                const nextBtn = await page.$('.btn-next');
-                if (nextBtn) {
-                    await nextBtn.click();
-                    await page.waitForTimeout(1500); // AJAX 로딩 대기
-                    currentMonthText = await page.$eval('.cal-navi h2', el => el.innerText).catch(() => '');
-                } else {
-                    log('🚨 다음달 버튼(.btn-next)을 찾을 수 없습니다. 페이지를 새로고침합니다.');
+                let navOk = false;
+                let navFailReason = '';
+                for (let navAttempt = 0; navAttempt < 3; navAttempt++) {
+                    const btn = page.locator('.btn-next').first();
+                    try {
+                        await btn.waitFor({ state: 'visible', timeout: 2000 });
+                    } catch (e) {
+                        navFailReason = 'noBtn';
+                        break;
+                    }
+                    await btn.click({ timeout: 2000 }).catch(() => {});
+                    // 사이트가 expected month 텍스트로 바뀔 때까지 polling 대기
+                    try {
+                        await page.waitForFunction(
+                            (exp) => document.querySelector('.cal-navi h2')?.innerText?.includes(exp),
+                            expectedText,
+                            { timeout: 3500 }
+                        );
+                        navOk = true;
+                        currentMonthText = expectedText;
+                        break;
+                    } catch (e) {
+                        currentMonthText = await page.$eval('.cal-navi h2', el => el.innerText).catch(() => '');
+                        if (currentMonthText.includes(expectedText)) { navOk = true; break; } // race 보정
+                    }
+                }
+                if (!navOk) {
+                    if (navFailReason === 'noBtn') {
+                        log(`${tag} .btn-next 미발견 → 페이지 새로고침`);
+                    } else {
+                        log(`${tag} 달력 이동 실패 (현재 ${currentMonthText || '읽기 실패'}) → 페이지 새로고침`);
+                    }
                     needsFullReload = true;
+                    await page.waitForTimeout(CONFIG.RELOAD_INTERVAL);
                     continue;
                 }
             }
 
-            if (!currentMonthText.includes(expectedText)) {
-                log(`[대기 중] 달력이 ${expectedText}로 넘어가지 않았습니다. (현재: ${currentMonthText || '(읽기 실패)'})`);
-                log(`${CONFIG.RELOAD_INTERVAL / 1000}초 후 다시 시도합니다.`);
-                
-                // 계속 안 넘어가면 5회마다 페이지 전체 새로고침
-                if (attempts % 5 === 0) {
-                    log('지속적으로 달력 이동에 실패하여 페이지를 새로고침합니다.');
-                    needsFullReload = true;
-                }
-                
-                await page.waitForTimeout(CONFIG.RELOAD_INTERVAL);
-                continue;
-            }
-
             // 달력 진입 성공 — 토요일 후보 탐색
-            // 토요일 열의 모든 td를 후보로 (비활성/off 제외 필터는 아래에서 텍스트 기반으로 판단)
-            const satCells = await page.$$('table tbody tr td:nth-child(7)');
-            const satInfos = [];
-            for (let i = 0; i < satCells.length; i++) {
-                const info = await satCells[i].evaluate(td => ({
-                    text: (td.innerText || '').replace(/\s+/g, ' ').trim(),
-                    className: td.className
-                }));
-                // 숫자(날짜)로 시작하고, 명시적 비활성 클래스가 아닌 셀만
-                if (/^\d{1,2}/.test(info.text) && !/off|disabled|inactive|gray/i.test(info.className)) {
-                    satInfos.push({ handle: satCells[i], ...info });
+            // 토요일 열의 모든 td를 수집한 뒤, 이전/다음 달이 그리드에 섞여 보이는 cell(class="work"여도 다른 달)을 제거.
+            // 방법: day가 단조증가하는 그룹으로 분할 → 첫 day가 1~7 사이인 가장 긴 그룹이 target month.
+            //   예) 6월(target) 그리드 [30, 6, 13, 20, 27, 4] → 그룹 [[30],[6,13,20,27],[4]] → [6,13,20,27] 선택
+            // ElementHandle 보관하지 않고 day 값만 — 클릭 시 page.evaluate로 fresh DOM 매칭(첫 td.click 후 AJAX로 캘린더 부분 re-render 시 stale handle 회피).
+            const allCandidates = await page.evaluate(() => {
+                const tds = document.querySelectorAll('table tbody tr td:nth-child(7)');
+                const out = [];
+                for (const td of tds) {
+                    const text = (td.innerText || '').replace(/\s+/g, ' ').trim();
+                    const m = text.match(/^(\d{1,2})/);
+                    if (!m) continue;
+                    if (/off|disabled|inactive|gray/i.test(td.className)) continue;
+                    out.push({ day: parseInt(m[1], 10), text, className: td.className });
                 }
+                return out;
+            });
+            const groups = [];
+            for (const c of allCandidates) {
+                const last = groups[groups.length - 1];
+                if (!last || c.day < last[last.length - 1].day) groups.push([c]);
+                else last.push(c);
             }
+            const targetGroups = groups.filter(g => g[0].day >= 1 && g[0].day <= 7);
+            let satInfos = targetGroups.length
+                ? targetGroups.sort((a, b) => b.length - a.length)[0]
+                : (groups[0] || []);
+            const droppedDays = allCandidates.filter(c => !satInfos.includes(c)).map(c => c.day);
+            if (SPECIFIC_DAY != null) satInfos = satInfos.filter(s => s.day === SPECIFIC_DAY);
+
             let slotFound = false;
+            // 'noTime' = 10시 슬롯 자체 없음, 'noPeople' = 10시 ✓ but 인원 매진
+            let bestOutcome = 'noTime';
 
             if (satInfos.length > 0) {
-                log(`[알림] 토요일 후보 셀 ${satInfos.length}개 탐색 시작`);
-                // await notifyDiscord(`🔔 **토요일 후보 탐색** (${satInfos.length}건)`);
-
                 for (const slot of satInfos) {
-                    log(`후보 클릭: "${slot.text}" (class="${slot.className}")`);
-                    await slot.handle.click();
+                    // fresh DOM 매칭 click — handle 보관 시 stale 발생
+                    const clicked = await page.evaluate((targetDay) => {
+                        const tds = document.querySelectorAll('table tbody tr td:nth-child(7)');
+                        for (const td of tds) {
+                            const m = (td.innerText || '').trim().match(/^(\d{1,2})/);
+                            if (m && parseInt(m[1], 10) === targetDay) { td.click(); return true; }
+                        }
+                        return false;
+                    }, slot.day);
+                    if (!clicked) continue;
                     await page.waitForTimeout(600); // AJAX 로딩 대기
 
                     // 우측 패널에서 "10:00" 포함 요소 찾기 (exact match 대신 substring)
@@ -383,28 +459,30 @@ async function start() {
                     for (const t of times) {
                         const tText = (await t.innerText()).replace(/\s+/g, ' ').trim();
                         if (tText.includes('10:00') && tText.includes('예약가능')) {
-                            log(`[성공] 10시 예약가능 슬롯 발견! (${tText})`);
+                            log(`${tag} [발견] ${slot.text}일 10시 예약가능 — 클릭 (${tText})`);
                             await t.click();
                             timeClicked = true;
                             break;
                         }
                     }
-                    if (!timeClicked) { log('이 날짜엔 10시 예약가능 없음 — 다음 후보'); continue; }
+                    if (!timeClicked) continue;
+                    if (bestOutcome === 'noTime') bestOutcome = 'noPeople';
                     await page.waitForTimeout(300);
 
-                    // 인원 선택: "1명(예약가능)" leaf 요소만 정확 매칭 (부모 컨테이너 매칭 시 "불가" 포함되어 실패하던 버그)
-                    const persons = await page.$$('text=/1명/');
+                    // 인원 선택: "{N}명(예약가능)" leaf 요소만 정확 매칭 (부모 컨테이너 매칭 시 "불가" 포함되어 실패하던 버그)
+                    const peopleN = CONFIG.TARGET_PEOPLE;
+                    const peopleRe = new RegExp(`^${peopleN}명\\s*\\(\\s*예약가능\\s*\\)$`);
+                    const persons = await page.$$(`text=/${peopleN}명/`);
                     for (const p of persons) {
                         const pText = (await p.innerText()).replace(/\s+/g, ' ').trim();
-                        // 정확한 매칭: "1명(예약가능)" 만 — 부모/조상 컨테이너 제외
-                        if (/^1명\s*\(\s*예약가능\s*\)$/.test(pText)) {
+                        if (peopleRe.test(pText)) {
                             await p.click();
-                            log(`[성공] 1명 인원 선택 완료 (${pText})`);
+                            log(`[성공] ${peopleN}명 인원 선택 완료 (${pText})`);
                             slotFound = true;
                             break;
                         }
                     }
-                    if (!slotFound) { log('1명 예약가능 없음 — 다음 후보'); continue; }
+                    if (!slotFound) continue;
 
                     await page.waitForTimeout(300);
 
@@ -451,7 +529,7 @@ async function start() {
                         recordReservation(monthKey, reservedDay, '10:00');
                         const newCount = getMonthCount(monthKey);
                         log(`[State] ${monthKey} 예약 ${newCount}건 기록됨`);
-                        await notifyDiscord(`🎉 **봉사 예약 완료** (${reservedMonth}월 ${reservedDay}일 토요일 10시) — ${monthKey} 누적 ${newCount}건`);
+                        await notifyDiscord(`🎉 **${ANIMAL_LABEL} 봉사 예약 완료** (${reservedMonth}월 ${reservedDay}일 토요일 10시, ${CONFIG.TARGET_PEOPLE}명) — ${monthKey} 누적 ${newCount}건`);
                         log('프로그램을 종료합니다.');
                         await browser.close();
                         return;
@@ -465,13 +543,22 @@ async function start() {
             }
 
             if (!slotFound) {
-                log(`[시도 ${attempts}] ${expectedText} 슬롯 없음 — ${CONFIG.RELOAD_INTERVAL / 1000}초 후 재시도`);
+                let summary;
+                if (satInfos.length === 0) {
+                    summary = '후보 0건';
+                } else if (bestOutcome === 'noPeople') {
+                    summary = `후보 ${satInfos.length}건 10시 ✓ / ${CONFIG.TARGET_PEOPLE}명 매진`;
+                } else {
+                    summary = `후보 ${satInfos.length}건 모두 10시 마감`;
+                }
+                const dropTag = (attempts === 1 && droppedDays.length) ? ` (인접월 ${droppedDays.join(',')}일 제외)` : '';
+                log(`${tag} ${expectedText} ${summary}${dropTag}`);
                 await page.waitForTimeout(CONFIG.RELOAD_INTERVAL);
                 needsFullReload = true; // 슬롯이 안 보일 때는 페이지 전체를 새로고침하여 최신 데이터 로딩
             }
 
         } catch (err) {
-            log(`탐색 중 오류: ${err.message}. ${CONFIG.RELOAD_INTERVAL / 1000}초 후 재시도...`);
+            log(`${tag} 오류: ${err.message}`);
             await page.waitForTimeout(CONFIG.RELOAD_INTERVAL);
         }
     }
