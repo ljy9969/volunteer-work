@@ -391,8 +391,9 @@ async function start() {
                 log(`📍 타겟 ${expectedText} | ${filterDesc}${excludeDesc} | 10시 ${CONFIG.TARGET_PEOPLE}명 | MAX_ATTEMPTS=${CONFIG.MAX_ATTEMPTS}`);
             }
 
-            // 달력 navi h2가 렌더링될 때까지 우선 대기 (페이지 첫 로드 직후 누락 방지)
+            // 달력 navi h2 + 토요일 td 둘 다 렌더링될 때까지 대기 — 5/26→6/2 사이 cells=[] 회귀 방지
             await page.waitForSelector('.cal-navi h2', { timeout: 5000 }).catch(() => {});
+            await page.waitForSelector('table tbody tr td:nth-child(7)', { timeout: 5000 }).catch(() => {});
             let currentMonthText = await page.$eval('.cal-navi h2', el => el.innerText).catch(() => '');
 
             // 달력 이동 로직 — AJAX 클릭. h2뿐 아니라 table cells도 target month의 토요일을 모두 표시해야
@@ -481,18 +482,34 @@ async function start() {
                 // cells=[]는 td 자체가 없거나 모두 off/disabled로 필터된 비정상 상태 — 진단 정보를 첫 회차에 dump
                 if (snap.cells.length === 0 && attempts === 1) {
                     const dbg = await page.evaluate(() => {
-                        const trs = document.querySelectorAll('table tbody tr');
-                        const sample = [];
-                        for (const tr of trs) {
-                            const sat = tr.querySelector('td:nth-child(7)');
-                            if (!sat) continue;
-                            sample.push({ text: (sat.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 20), cls: sat.className });
-                            if (sample.length >= 6) break;
+                        const tables = Array.from(document.querySelectorAll('table'));
+                        const tableInfo = tables.map(tbl => ({
+                            cls: tbl.className || '(no-class)',
+                            id: tbl.id || '',
+                            tbodyTrs: tbl.querySelectorAll('tbody tr').length,
+                            firstRowCells: tbl.querySelector('tbody tr')?.children?.length ?? 0,
+                            sat7: tbl.querySelector('tbody tr td:nth-child(7)')?.innerText?.replace(/\s+/g,' ').trim()?.slice(0, 20) || ''
+                        }));
+                        const calContSel = ['.cal-cont', '.calendar', '#calendar', '[class*="cal"]'].map(s => ({
+                            sel: s,
+                            found: !!document.querySelector(s),
+                            innerHTML: document.querySelector(s)?.innerHTML?.slice(0, 120) || ''
+                        }));
+                        return { tableInfo, calContSel };
+                    }).catch(e => ({ error: e.message }));
+                    log(`${tag} [debug] navText='${snap.navText}'`);
+                    if (dbg.tableInfo) {
+                        for (let i = 0; i < dbg.tableInfo.length; i++) {
+                            const t = dbg.tableInfo[i];
+                            log(`${tag} [debug] table[${i}] cls='${t.cls}' id='${t.id}' tbody-tr=${t.tbodyTrs} row1-cells=${t.firstRowCells} sat7='${t.sat7}'`);
                         }
-                        return { trCount: trs.length, sample };
-                    }).catch(() => ({ trCount: -1, sample: [] }));
-                    const sampleStr = dbg.sample.map(s => `'${s.text}'/${s.cls || '(no-class)'}`).join(' | ');
-                    log(`${tag} [debug] table tr=${dbg.trCount}, 토요일 td 샘플: ${sampleStr || '(none)'}`);
+                    }
+                    if (dbg.calContSel) {
+                        for (const c of dbg.calContSel) {
+                            if (c.found) log(`${tag} [debug] ${c.sel} found, innerHTML(120c)='${c.innerHTML.replace(/\s+/g,' ')}'`);
+                        }
+                    }
+                    if (dbg.error) log(`${tag} [debug] error: ${dbg.error}`);
                 }
                 log(`${tag} 달력 cells 동기화 실패 (target sat ${missingTargetSats.join(',')}일 미표시, cells=[${[...cellDays].sort((a,b)=>a-b).join(',')}]) → 새로고침`);
                 needsFullReload = true;
