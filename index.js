@@ -209,11 +209,9 @@ async function start() {
         .map(s => s.trim())
         .filter(s => /^\d{4}-\d{2}-\d{2}$/.test(s));
 
-    // Hunt 모드 + 오늘이 15일이면 월간 스케줄(dog Monthly)과 충돌 방지를 위해 즉시 종료. cat은 Monthly 없음 → 영향 없음.
-    if (CANCEL_HUNT && ANIMAL_TYPE === 'dog' && new Date().getDate() === 15) {
-        log('[hunt] 오늘은 15일 (월간 스케줄 실행일) — RebornVolunteer와 충돌 방지 위해 종료');
-        return;
-    }
+    // 15일 가드 제거 (2026-06-16) — Monthly가 절전/Ctrl+C 등으로 죽으면 hunt도 종일 안 돌아서
+    // 11시 슬롯 오픈을 통째로 놓치는 사고가 발생함. 한도 1건 + 사이트 source-of-truth라 Monthly가 잡으면
+    // hunt 다음 회차에서 자동 종료되므로 race 위험은 없음.
 
     // 타겟 month key — 매달 15일부터는 다음달, 1~14일은 현재 달 (사이트는 15일 이후 다음달 예약 오픈)
     const _today = new Date();
